@@ -256,15 +256,6 @@ def pp(prop):
     return binascii.hexlify(bytearray([prop]))
 
 import serial
-RS485 = serial.Serial(
-        port        = '/dev/ttyUSB0',
-        baudrate    = 9600,
-        parity      = serial.PARITY_NONE,
-        stopbits    = serial.STOPBITS_ONE,
-        bytesize    = serial.EIGHTBITS,
-        timeout     = 1
-        )
-
 import binascii
 import time
 
@@ -273,10 +264,11 @@ class Packet():
     payload_header     = 0xA5
     version            = 0x00
 
-    def __init__(self, *args, src=ADDRESSES['REMOTE_CONTROLLER'], dst=None, action=None, data=None):
+    def __init__(self, *args, serial_connection=None, src=ADDRESSES['REMOTE_CONTROLLER'], dst=None, action=None, data=None):
         if args is not ():
             self.bytes      = args
         else:
+            self.serial_connection = serial_connection
             self.dst        = dst
             self.action     = action
             self.src        = src
@@ -320,10 +312,10 @@ class Packet():
             print("      CLOCK_TIME_M:\t", data[PUMP_STATUS_FIELDS['CLOCK_TIME_M']])
 
     def send(self):
-        RS485.write(bytearray(self.bytes))
+        self.serial_connection.write(bytearray(self.bytes))
         if DEBUG: print()
         if DEBUG: print(STYLE['OKGREEN'] + "Request: ", self.bytes, STYLE['ENDC'])
-        response = getResponse()
+        response = self.getResponse()
         if DEBUG: print(STYLE['OKBLUE'] + "Response:", response.bytes, STYLE['ENDC'])
         if response.action == self.action:
             return response
@@ -335,6 +327,21 @@ class Packet():
             return response
         else:
             raise ValueError("This packet goes somewhere else -- maybe we need a buffer")
+
+    def getResponse(self):
+        pbytes = []
+        while True:
+            for c in self.serial_connection.read():
+                pbytes.append(c)
+                if len(pbytes) > 4:
+                    pbytes.pop(0)
+                if pbytes == Packet.header + [Packet.payload_header]:
+                    pbytes.extend(list(self.serial_connection.read(4)))  # Version, DST, SRC, Action
+                    data_length = ord(self.serial_connection.read())  # Data Length
+                    pbytes.append(data_length)  #
+                    pbytes.extend(list(self.serial_connection.read(data_length)))  # Data
+                    pbytes.extend(list(self.serial_connection.read(2)))  # Checksum
+                    return Packet(pbytes)
 
     @property
     def bytes(self):
@@ -397,15 +404,16 @@ class Packet():
             return [Packet.payload_header, Packet.version, self.dst, self.src, self.action, self.data_length]
 
 class Pump():
-    def __init__(self, index):
-        self.__address          = ADDRESSES["INTELLIFLO_PUMP_" + str(index)]
+    def __init__(self, address, serial_connection):
+        self.__address          = address
         self.__remote_control   = None
         self.__speed            = None
+        self.serial_connection = serial_connection
 
     def send(self, action, data=None):
 
 #        self.remote_control = True
-        response = Packet(dst=self.address, action=action, data=data).send()
+        response = Packet(serial_connection=self.serial_connection, dst=self.address, action=action, data=data).send()
         # Should add some error checking and retry logic here -- confirm that
         # the response packet is for the same action we sent or handle the
         # error if not.
@@ -844,19 +852,13 @@ def setPumpTimer():
 
 def broadcast(action, data=None):
     dst = ADDRESSES['BROADCAST']
+    RS485 = serial.Serial(
+        port='/dev/ttyUSB0',
+        baudrate=9600,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_ONE,
+        bytesize=serial.EIGHTBITS,
+        timeout=1
+    )
     RS485.write(buildPacket(dst, action, data))
 
-def getResponse():
-    pbytes = []
-    while True:
-        for c in RS485.read():
-            pbytes.append(c)
-            if len(pbytes) > 4:
-                pbytes.pop(0)
-            if pbytes == Packet.header + [Packet.payload_header]:
-                pbytes.extend(list(RS485.read(4)))              # Version, DST, SRC, Action
-                data_length = ord(RS485.read())                 # Data Length
-                pbytes.append(data_length)                      #
-                pbytes.extend(list(RS485.read(data_length)))    # Data
-                pbytes.extend(list(RS485.read(2)))              # Checksum
-                return Packet(pbytes)
